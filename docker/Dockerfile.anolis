@@ -1,0 +1,41 @@
+ARG BASE_IMAGE=openanolis/anolisos:23.4
+FROM $BASE_IMAGE AS builder
+
+ARG REPREPRO_BRANCH=reprepro-5.5.1
+
+RUN dnf install -y \
+    git \
+    automake \
+    gcc \
+    libdb-devel \
+    gpgme-devel \
+    libarchive-devel
+
+RUN git clone --branch ${REPREPRO_BRANCH} https://salsa.debian.org/debian/reprepro.git \
+    && cd reprepro \
+    && ./autogen.sh \
+    && ./configure \
+    && make -j$(nproc) prefix=/usr/local \
+    && make -j$(nproc) install prefix=/usr/local \
+    && reprepro --version
+
+FROM $BASE_IMAGE
+
+ARG REPREPRO_BRANCH=reprepro-5.5.1
+
+LABEL maintainer="徐晓伟 <xuxiaowei@xuxiaowei.com.cn>" \
+      license="Apache-2.0" \
+      org.opencontainers.image.authors="徐晓伟 <xuxiaowei@xuxiaowei.com.cn>" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.title="reprepro" \
+      org.opencontainers.image.description="reprepro ${REPREPRO_BRANCH}" \
+      org.opencontainers.image.version="${REPREPRO_BRANCH}" \
+      org.opencontainers.image.url="https://github.com/kubernetes-loong64/reprepro" \
+      org.opencontainers.image.source="https://github.com/kubernetes-loong64/reprepro"
+
+COPY --from=builder /usr/local /usr/local
+
+RUN dnf install -y libdb \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf \
+    && reprepro --version
