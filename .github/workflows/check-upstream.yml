@@ -1,0 +1,151 @@
+name: check-upstream
+
+on:
+  schedule:
+    - cron: '17 17 * * *'  # UTC 17:17 daily (Beijing 01:17 CST)
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/check-upstream.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/check-upstream.yml
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0  # Fetch all branches and tags
+      - name: Check for new upstream release
+        id: check
+        run: |
+          # Fetch latest upstream reprepro-* tag from salsa.debian.org
+          UPSTREAM_TAG=$(git ls-remote --tags --sort=-v:refname \
+            https://salsa.debian.org/debian/reprepro.git \
+            'refs/tags/reprepro-*' \
+            | grep -E 'refs/tags/reprepro-[0-9]+\.[0-9]+\.[0-9]+$' \
+            | head -1 | awk '{print $2}' | sed 's|refs/tags/||')
+
+          if [ -z "${UPSTREAM_TAG}" ]; then
+            echo "No upstream reprepro-* tag found, aborting."
+            echo "NEED_UPDATE=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "Latest upstream tag: ${UPSTREAM_TAG}"
+          echo "UPSTREAM_TAG=${UPSTREAM_TAG}" >> "${GITHUB_OUTPUT}"
+
+          # Get latest local tag and extract version (strip +N suffix)
+          LOCAL_TAG=$(git tag --sort=-v:refname 'reprepro-*' | grep -E '^reprepro-[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          if [ -z "${LOCAL_TAG}" ]; then
+            echo "No local reprepro-* tag found. Will create initial branch."
+            LOCAL_VERSION=""
+          else
+            LOCAL_VERSION=$(echo "${LOCAL_TAG}" | sed 's/+.*//')
+            echo "Latest local version: ${LOCAL_VERSION}"
+          fi
+          echo "LOCAL_VERSION=${LOCAL_VERSION}" >> "${GITHUB_OUTPUT}"
+
+          # Version comparison: is upstream newer than local?
+          if [ "${UPSTREAM_TAG}" = "${LOCAL_VERSION}" ]; then
+            echo "Already up to date. Nothing to do."
+            echo "NEED_UPDATE=false" >> "${GITHUB_OUTPUT}"
+          else
+            LATEST=$(printf '%s\n%s' "${UPSTREAM_TAG}" "${LOCAL_VERSION}" | sort -V | tail -1)
+            if [ "${LATEST}" = "${UPSTREAM_TAG}" ]; then
+              echo "New upstream version detected: ${UPSTREAM_TAG} (current: ${LOCAL_VERSION:-none})"
+              echo "NEED_UPDATE=true" >> "${GITHUB_OUTPUT}"
+            else
+              echo "Local version is newer or equal. Nothing to do."
+              echo "NEED_UPDATE=false" >> "${GITHUB_OUTPUT}"
+            fi
+          fi
+
+      - name: Create branch for new version
+        if: steps.check.outputs.NEED_UPDATE == 'true' && github.event_name != 'pull_request'
+        run: |
+          UPSTREAM_TAG="${{ steps.check.outputs.UPSTREAM_TAG }}"
+
+          # Check if branch already exists on remote
+          if git ls-remote --heads origin "refs/heads/${UPSTREAM_TAG}" | grep -q "${UPSTREAM_TAG}"; then
+            echo "Branch ${UPSTREAM_TAG} already exists on remote, skipping."
+            exit 0
+          fi
+
+          # Find the latest local reprepro-* branch to use as base
+          BASE_BRANCH=$(git branch -r --sort=-v:refname | grep -E 'origin/reprepro-[0-9]+\.[0-9]+\.[0-9]+$' | head -1 | sed 's|.*origin/||')
+          if [ -z "${BASE_BRANCH}" ]; then
+            BASE_BRANCH="main"
+            echo "No existing reprepro-* branch found, using main as base."
+          else
+            echo "Using ${BASE_BRANCH} as base branch."
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin "${BASE_BRANCH}"
+          git checkout -b "${UPSTREAM_TAG}" "origin/${BASE_BRANCH}"
+          git push origin "${UPSTREAM_TAG}"
+
+          echo "Created and pushed branch: ${UPSTREAM_TAG}"
+
+      - name: Create Issue
+        if: steps.check.outputs.NEED_UPDATE == 'true' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GH_BOT_TOKEN }}
+        run: |
+          UPSTREAM_TAG="${{ steps.check.outputs.UPSTREAM_TAG }}"
+          LOCAL_VERSION="${{ steps.check.outputs.LOCAL_VERSION }}"
+
+          ISSUE_TITLE=":arrow_up: reprepro ${UPSTREAM_TAG} update available"
+
+          echo "==> Checking if an open issue already exists..."
+
+          # Check if an open issue already exists for this upstream version
+          EXISTING=$(gh issue list \
+            --label "upstream-update" \
+            --state open \
+            --search "reprepro ${UPSTREAM_TAG}" \
+            --json number \
+            --jq '.[0].number' 2>/dev/null || true)
+
+          if [ -n "$EXISTING" ]; then
+            echo "Issue #${EXISTING} already open for ${UPSTREAM_TAG}, skipping."
+            exit 0
+          fi
+
+          echo "==> Creating issue..."
+
+          BODY=$(cat <<EOF
+          A new upstream reprepro release has been detected.
+
+          ## Upstream Tag
+          https://salsa.debian.org/debian/reprepro/-/tags/${UPSTREAM_TAG}
+
+          ## Branch
+          Branch \`${UPSTREAM_TAG}\` has been created for this version.
+
+          ## Previous Version
+          ${LOCAL_VERSION:-none}
+          EOF
+          )
+
+          gh issue create \
+            --title "$ISSUE_TITLE" \
+            --label "upstream-update" \
+            --body "$BODY"
+
+          echo "Issue created for ${UPSTREAM_TAG}"

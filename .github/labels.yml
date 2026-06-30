@@ -1,0 +1,11 @@
+# GitHub Labels — declarative configuration
+# Synced by .github/workflows/labels.yml on every push to this file
+#
+# Format:
+#   - name: label-name
+#     color: hex-without-hash
+#     description: what it's for
+
+- name: upstream-update
+  color: "0075ca"
+  description: Upstream version update available
